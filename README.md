@@ -6,6 +6,7 @@ Projeto desenvolvido durante uma pesquisa de **PIBIC Júnior da UNESP Ourinhos**
 <br>
 
 <p align="center"> <img src="QrcodeGoogleEarthEngine.png" alt="QR Code do Google Earth Engine" width="180"> </p>
+
 # Como funciona?
 
 A ideia é simples:
