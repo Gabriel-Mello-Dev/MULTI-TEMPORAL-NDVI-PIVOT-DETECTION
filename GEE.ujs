@@ -1,0 +1,215 @@
+// =====================================================
+// AREA DE ESTUDO
+// =====================================================
+var center = ee.Geometry.Point([-49.469044930377024, -23.06794929792613]);
+var AOI = center.buffer(4500);
+
+Map.centerObject(AOI,13);
+
+// =====================================================
+// FUNÇÃO NDVI + TEXTURA
+// =====================================================
+function ndviTexture(startDate,endDate){
+
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+.filterBounds(AOI)
+.filterDate(startDate,endDate)
+.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',40))
+.map(function(img){
+
+var qa = img.select('QA60');
+
+var mask = qa.bitwiseAnd(1<<10).eq(0)
+.and(qa.bitwiseAnd(1<<11).eq(0));
+
+return img.updateMask(mask).divide(10000);
+
+})
+.median()
+.clip(AOI);
+
+// =====================================================
+// NDVI
+// =====================================================
+var ndvi = s2.normalizedDifference(['B8','B4']).rename('NDVI');
+
+// =====================================================
+// TEXTURA GLCM
+// =====================================================
+var texture = ndvi
+.multiply(240)
+.toByte()
+.glcmTexture({size:2})
+.select('NDVI_contrast');
+
+// =====================================================
+// RETORNAR TUDO
+// =====================================================
+return {
+  s2: s2,
+  ndvi: ndvi,
+  texture: texture
+};
+
+}
+
+// =====================================================
+// DADOS DOS PERÍODOS
+// =====================================================
+var p1 = ndviTexture('2024-01-01','2024-01-30');
+var p2 = ndviTexture('2024-04-01','2024-04-30');
+var p3 = ndviTexture('2024-07-01','2024-07-31');
+
+// =====================================================
+// EXTRAIR TEXTURAS
+// =====================================================
+var t1 = p1.texture;
+var t2 = p2.texture;
+var t3 = p3.texture;
+
+// =====================================================
+// CAMADAS VISUAIS
+// =====================================================
+
+// RGB Sentinel-2
+Map.addLayer(
+  p1.s2,
+  {
+    bands:['B4','B3','B2'],
+    min:0,
+    max:0.3
+  },
+  'Imagem RGB'
+);
+
+// NDVI
+Map.addLayer(
+  p1.ndvi,
+  {
+    min:-1,
+    max:1,
+    palette:['blue','white','green']
+  },
+  'NDVI'
+);
+
+// MATRIZ/TEXTURA
+Map.addLayer(
+  t1,
+  {
+    min:0,
+    max:150,
+    palette:['black','purple','cyan','yellow','red']
+  },
+  'Matriz de textura'
+);
+
+// =====================================================
+// DETECÇÃO DE MUDANÇA
+// =====================================================
+var change = t1.subtract(t2).abs()
+.add(t2.subtract(t3).abs())
+.gt(100);
+
+// =====================================================
+// DETECÇÃO DE BORDAS
+// =====================================================
+var edges = ee.Algorithms.CannyEdgeDetector({
+image: change,
+threshold:0.7,
+sigma:1
+});
+
+// =====================================================
+// FECHAR BORDAS
+// =====================================================
+var filled = edges
+.focal_max(5)
+.focal_min(3)
+.selfMask();
+
+// =====================================================
+// VISUALIZAÇÃO
+// =====================================================
+Map.addLayer(filled,{palette:'cyan'},'Regiões fechadas');
+
+// =====================================================
+// INVERSÃO DA MÁSCARA LIMITADA AO AOI
+// =====================================================
+var inverted = filled
+.unmask(0)
+.not()
+.updateMask(ee.Image.constant(1).clip(AOI))
+.selfMask();
+
+// =====================================================
+// VISUALIZAÇÃO
+// =====================================================
+Map.addLayer(inverted,{palette:'yellow'},'Máscara invertida');
+
+// =====================================================
+// FECHAR LACUNAS MAIORES
+// =====================================================
+filled = edges
+.focal_max(15)
+.focal_min(10)
+.focal_max(5)
+.selfMask();
+
+// =====================================================
+// VETORIZAR ÁREAS DETECTADAS
+// =====================================================
+var vectors = inverted.reduceToVectors({
+  geometry: AOI,
+  scale: 10,
+  geometryType: 'polygon',
+  eightConnected: true,
+  maxPixels: 1e9
+});
+
+// =====================================================
+// CALCULAR MÉTRICAS
+// =====================================================
+var metrics = vectors.map(function(f){
+
+  var geom = f.geometry().simplify(5);
+
+  var area = geom.area({maxError:1});
+  var perimeter = geom.perimeter({maxError:1});
+
+  var circularity = ee.Number(4)
+    .multiply(Math.PI)
+    .multiply(area)
+    .divide(perimeter.pow(2));
+
+  var bbox = geom.bounds();
+  var bboxArea = bbox.area({maxError:1});
+
+  var rectRatio = area.divide(bboxArea);
+
+  return f.set({
+    area: area,
+    circularity: circularity,
+    rectRatio: rectRatio
+  });
+
+});
+
+// =====================================================
+// FILTRAR PIVÔS E SEMICÍRCULOS
+// =====================================================
+var pivots = metrics
+.filter(ee.Filter.gt('area', 50000))
+.filter(ee.Filter.lt('area', 2000000))
+.filter(ee.Filter.gt('circularity', 0.2))
+.filter(ee.Filter.lt('rectRatio', 0.85));
+
+// =====================================================
+// VOLTAR PARA RASTER
+// =====================================================
+var pivotMask = ee.Image().byte().paint(pivots,1).selfMask();
+
+// =====================================================
+// NOVA CAMADA
+// =====================================================
+Map.addLayer(pivotMask,{palette:'red'},'Pivos detectados');
